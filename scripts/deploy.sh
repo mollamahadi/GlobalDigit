@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_DIR="/opt/global-digits-bot"
-LOCK_FILE="/tmp/global-digits-deploy.lock"
+LOCK_FILE="/tmp/global-digits-deploy-$(id -u).lock"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then

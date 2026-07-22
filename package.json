@@ -1,12 +1,12 @@
 {
   "name": "global-digits-bot",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Global Digits Telegram store with PostgreSQL and Google Sheets sync",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/database.js && node --check src/sheet-sync.js && node --check src/config.js",
+    "check": "node --check src/index.js && node --check src/database.js && node --check src/sheet-sync.js && node --check src/config.js && node --check src/backup.js",
     "db:check": "node scripts/check-database.js"
   },
   "dependencies": {

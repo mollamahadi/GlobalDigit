@@ -15,7 +15,7 @@ if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
 fi
 
 apt-get update
-apt-get install -y rsync
+apt-get install -y rsync postgresql-client
 
 install -d -m 755 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR"
 install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "/home/$DEPLOY_USER/.ssh"

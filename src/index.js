@@ -1,8 +1,10 @@
 const http = require("http");
+const fs = require("fs/promises");
 const { Telegraf, Markup, session } = require("telegraf");
 const config = require("./config");
 const db = require("./database");
 const payments = require("./payments");
+const { createDatabaseBackup } = require("./backup");
 const { startSheetWorker, stopSheetWorker, queueFullSync } = require("./sheet-sync");
 
 const bot = new Telegraf(config.botToken);
@@ -246,7 +248,7 @@ bot.hears("🛒 Buy Product", async (ctx) => {
   if (await guard(ctx)) return;
   const categories = await db.prepare("SELECT * FROM categories WHERE status='active' ORDER BY id").all();
   if (!categories.length) return screenReply(ctx, "No products are available right now.", backButton());
-  const rows = categories.map((c) => [Markup.button.callback(`📁 ${c.name}`, `cat_${c.id}`)]);
+  const rows = categories.map((c) => [Markup.button.callback(`📁 ${String(c.name).slice(0, 50)}`, `cat_${c.id}`)]);
   rows.push([Markup.button.callback("⬅️ Back", "back_main")]);
   return screenReply(ctx, "Select a category:", Markup.inlineKeyboard(rows));
 });
@@ -254,7 +256,7 @@ bot.hears("🛒 Buy Product", async (ctx) => {
 bot.action("back_categories", async (ctx) => {
   await safeAnswer(ctx);
   const categories = await db.prepare("SELECT * FROM categories WHERE status='active' ORDER BY id").all();
-  const rows = categories.map((c) => [Markup.button.callback(`📁 ${c.name}`, `cat_${c.id}`)]);
+  const rows = categories.map((c) => [Markup.button.callback(`📁 ${String(c.name).slice(0, 50)}`, `cat_${c.id}`)]);
   rows.push([Markup.button.callback("⬅️ Back", "back_main")]);
   return screenReply(ctx, "Select a category:", Markup.inlineKeyboard(rows));
 });
@@ -264,7 +266,7 @@ bot.action(/^cat_(\d+)$/, async (ctx) => {
   const products = await db.prepare(`SELECT p.*, COUNT(CASE WHEN s.status='available' THEN 1 END) stock_count
     FROM products p LEFT JOIN stocks s ON s.product_id=p.id WHERE p.category_id=? AND p.status='active' GROUP BY p.id`).all(ctx.match[1]);
   await ctx.answerCbQuery();
-  const rows = products.map((p) => [Markup.button.callback(`${p.name} — $${Number(p.price).toFixed(2)} | ${p.delivery_mode === "manual" ? "Manual" : `Stock: ${p.stock_count}`}`, `product_${p.id}`)]);
+  const rows = products.map((p) => [Markup.button.callback(`${String(p.name).slice(0, 38)} — $${Number(p.price).toFixed(2)} | ${p.delivery_mode === "manual" ? "Manual" : `Stock: ${p.stock_count}`}`, `product_${p.id}`)]);
   rows.push([Markup.button.callback("⬅️ Back", "back_categories")]);
   if (!products.length) return screenReply(ctx, "No active products in this category.", Markup.inlineKeyboard(rows));
   return screenReply(ctx, "Select a product:", Markup.inlineKeyboard(rows));
@@ -278,11 +280,11 @@ bot.action(/^product_(\d+)$/, async (ctx) => {
   ctx.session.buy = { productId: p.id, categoryId: p.category_id };
   if (p.product_type === "area") {
     const configured = String(p.area_codes || "").split(",").map((x) => x.trim()).filter(Boolean);
-    const stockAreas = await db.prepare("SELECT area_code, COUNT(*) count FROM stocks WHERE product_id=? AND status='available' AND area_code IS NOT NULL GROUP BY area_code").all(p.id);
+    const stockAreas = await db.prepare("SELECT area_code, COUNT(*) count FROM stocks WHERE product_id=? AND status='available' AND area_code IS NOT NULL GROUP BY area_code ORDER BY area_code").all(p.id);
     const counts = Object.fromEntries(stockAreas.map((a) => [a.area_code, a.count]));
     const codes = configured.length ? configured : stockAreas.map((a) => a.area_code);
-    const visible = p.delivery_mode === "manual" ? codes : codes.filter((code) => Number(counts[code] || 0) > 0);
-    const rows = visible.map((code) => [Markup.button.callback(`${code}${p.delivery_mode === "auto" ? ` | Stock: ${counts[code] || 0}` : ""}`, `area_${p.id}_${code}`)]);
+    const visible = codes.map((code, index) => ({ code, index })).filter((item) => p.delivery_mode === "manual" || Number(counts[item.code] || 0) > 0);
+    const rows = visible.map(({ code, index }) => [Markup.button.callback(`${String(code).slice(0, 42)}${p.delivery_mode === "auto" ? ` | Stock: ${counts[code] || 0}` : ""}`, `area_${p.id}_${index}`)]);
     rows.push([Markup.button.callback("⬅️ Back", `cat_${p.category_id}`)]);
     if (!visible.length) return screenReply(ctx, "This product is currently out of stock.", Markup.inlineKeyboard(rows));
     return screenReply(ctx, `📦 ${p.name}\nPrice: $${Number(p.price).toFixed(2)} each\nDelivery: ${p.delivery_mode === "auto" ? "Automatic" : "Manual"}\n\nSelect area code:`, Markup.inlineKeyboard(rows));
@@ -291,12 +293,24 @@ bot.action(/^product_(\d+)$/, async (ctx) => {
   return screenReply(ctx, `📦 ${p.name}\nPrice: $${Number(p.price).toFixed(2)} each\nDelivery: ${p.delivery_mode === "auto" ? "Automatic" : "Manual"}\n\nSend the quantity as a number.`, Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `cat_${p.category_id}`)]]));
 });
 
-bot.action(/^area_(\d+)_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.session.buy = { productId: Number(ctx.match[1]), areaCode: ctx.match[2], step: "quantity" };
-  const p = await db.prepare("SELECT * FROM products WHERE id=?").get(ctx.match[1]);
-  ctx.session.buy.categoryId = p?.category_id;
-  return screenReply(ctx, `Area code selected: ${ctx.match[2]}\nSend the quantity as a number.`, Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `product_${ctx.match[1]}`)]]));
+bot.action(/^area_(\d+)_(\d+)$/, async (ctx) => {
+  if (await guard(ctx)) return;
+  await safeAnswer(ctx);
+  const productId = Number(ctx.match[1]);
+  const index = Number(ctx.match[2]);
+  const product = await db.prepare("SELECT * FROM products WHERE id=? AND status='active'").get(productId);
+  if (!product || product.product_type !== "area") return screenReply(ctx, "Product is no longer available.", backButton("back_categories"));
+  const configured = String(product.area_codes || "").split(",").map((value) => value.trim()).filter(Boolean);
+  const stockAreas = configured.length ? [] : await db.prepare("SELECT DISTINCT area_code FROM stocks WHERE product_id=? AND status='available' AND area_code IS NOT NULL ORDER BY area_code").all(productId);
+  const codes = configured.length ? configured : stockAreas.map((row) => row.area_code);
+  const areaCode = codes[index];
+  if (!areaCode) return screenReply(ctx, "Area code is no longer available.", backButton(`product_${productId}`));
+  if (product.delivery_mode === "auto") {
+    const stock = await db.prepare("SELECT id FROM stocks WHERE product_id=? AND status='available' AND area_code=? LIMIT 1").get(productId, areaCode);
+    if (!stock) return screenReply(ctx, "This area code is currently out of stock.", backButton(`product_${productId}`));
+  }
+  ctx.session.buy = { productId, areaCode, categoryId: product.category_id, step: "quantity" };
+  return screenReply(ctx, `Area code selected: ${areaCode}\nSend the quantity as a number.`, Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `product_${productId}`)]]));
 });
 
 bot.hears("📦 My Orders", async (ctx) => {
@@ -313,7 +327,8 @@ function adminKeyboard() {
     [Markup.button.callback("📥 Add Stock", "admin_add_stock"), Markup.button.callback("📦 Products", "admin_products")],
     [Markup.button.callback("🚚 Manual Orders", "admin_manual_orders"), Markup.button.callback("💳 Deposits", "admin_deposits")],
     [Markup.button.callback("💵 Add Balance", "admin_add_balance"), Markup.button.callback("➖ Cut Balance", "admin_cut_balance")],
-    [Markup.button.callback("🔄 Sheet Sync", "admin_sheet_status"), Markup.button.callback("📋 Commands", "admin_commands")],
+    [Markup.button.callback("🔄 Sheet Sync", "admin_sheet_status"), Markup.button.callback("🗄 Database Backup", "admin_backup")],
+    [Markup.button.callback("📋 Commands", "admin_commands")],
     [Markup.button.callback("⬅️ Main Menu", "back_main")]
   ]);
 }
@@ -368,6 +383,48 @@ bot.action("admin_sheet_full_sync", async (ctx) => {
   }
 });
 
+const backupJobs = new Set();
+const TELEGRAM_BACKUP_LIMIT = 49 * 1024 * 1024;
+
+async function sendDatabaseBackup(ctx) {
+  if (adminOnly(ctx)) return;
+  if (ctx.chat?.type !== "private") {
+    return ctx.reply("For security, request database backups in a private chat with the bot.");
+  }
+  const adminId = String(ctx.from.id);
+  if (backupJobs.has(adminId)) return ctx.reply("A database backup is already being prepared. Please wait.");
+  backupJobs.add(adminId);
+  let backup;
+  try {
+    await screenReply(ctx, "⏳ Creating a compressed PostgreSQL dump...\n\nThis may take a moment.", backButton("admin_home"));
+    backup = await createDatabaseBackup(config.databaseUrl);
+    if (backup.sizeBytes > TELEGRAM_BACKUP_LIMIT) {
+      throw new Error("Backup is larger than Telegram's document limit. Download it directly from the VPS instead.");
+    }
+    await clearScreen(ctx);
+    const sizeMb = (backup.sizeBytes / 1024 / 1024).toFixed(2);
+    await ctx.replyWithDocument(
+      { source: backup.filePath, filename: backup.fileName },
+      {
+        caption: `✅ Global Digits Database Backup\n\nCreated: ${backup.createdAt.toISOString()}\nSize: ${sizeMb} MB\nFormat: PostgreSQL custom dump\n\nKeep this file private. It contains customer, order, stock, and delivery data.`
+      }
+    );
+    await trackedReply(ctx, "The backup file will remain in this private chat when you return to the Admin Panel.", backButton("admin_home"));
+  } catch (error) {
+    console.error("Database backup failed:", error.message);
+    await screenReply(ctx, `❌ Database backup failed.\n\n${error.message}`, backButton("admin_home"));
+  } finally {
+    if (backup?.filePath) await fs.unlink(backup.filePath).catch(() => {});
+    backupJobs.delete(adminId);
+  }
+}
+
+bot.action("admin_backup", async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx, "Preparing backup");
+  return sendDatabaseBackup(ctx);
+});
+
 bot.action("admin_add_category", async (ctx) => {
   if (adminOnly(ctx)) return;
   await ctx.answerCbQuery();
@@ -384,7 +441,7 @@ bot.action("admin_add_product", async (ctx) => {
     [Markup.button.callback("⬅️ Back", "admin_home")]
   ]));
   ctx.session.adminFlow = { type: "product", step: "category" };
-  const rows = categories.map((c) => [Markup.button.callback(c.name, `admin_product_cat_${c.id}`)]);
+  const rows = categories.map((c) => [Markup.button.callback(String(c.name).slice(0, 52), `admin_product_cat_${c.id}`)]);
   rows.push([Markup.button.callback("⬅️ Back", "admin_home")]);
   return screenReply(ctx, "Select product category:", Markup.inlineKeyboard(rows));
 });
@@ -479,11 +536,194 @@ bot.action(/^admin_delivery_(auto|manual)$/, async (ctx) => {
   ]));
 });
 
+async function getManagedProduct(productId) {
+  return db.prepare(`SELECT p.*,c.name category,
+    (SELECT COUNT(*) FROM stocks s WHERE s.product_id=p.id AND s.status='available') available_stock
+    FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=?`).get(productId);
+}
+
+async function syncManagedProduct(productId) {
+  const product = await db.prepare("SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=?").get(productId);
+  if (product) await db.enqueueSheetEvent("product_upsert", product.id, product);
+  return product;
+}
+
+function managedProductText(product) {
+  return `📦 Product #${product.id}\n\nName: ${product.name}\nCategory: ${product.category}\nPrice: $${Number(product.price).toFixed(2)}\nDelivery: ${product.delivery_mode === "auto" ? "Automatic" : "Manual"}\nArea Codes: ${product.area_codes || "None"}\nAvailable Stock: ${Number(product.available_stock || 0)}\nStatus: ${product.status}`;
+}
+
+async function showManagedProducts(ctx, requestedPage = 0) {
+  const pageSize = 8;
+  const countRow = await db.prepare("SELECT COUNT(*) count FROM products WHERE status<>'deleted'").get();
+  const count = Number(countRow?.count || 0);
+  const totalPages = Math.max(1, Math.ceil(count / pageSize));
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), totalPages - 1);
+  ctx.session.adminProductPage = page;
+  const products = await db.prepare("SELECT id,name,price,status FROM products WHERE status<>'deleted' ORDER BY id DESC LIMIT ? OFFSET ?").all(pageSize, page * pageSize);
+  const rows = products.map((product) => [
+    Markup.button.callback(`${product.status === "active" ? "🟢" : "⏸"} #${product.id} ${String(product.name).slice(0, 36)} • $${Number(product.price).toFixed(2)}`, `admin_product_view_${product.id}`)
+  ]);
+  const navigation = [];
+  if (page > 0) navigation.push(Markup.button.callback("⬅️ Previous", `admin_products_page_${page - 1}`));
+  if (page + 1 < totalPages) navigation.push(Markup.button.callback("Next ➡️", `admin_products_page_${page + 1}`));
+  if (navigation.length) rows.push(navigation);
+  rows.push([Markup.button.callback("➕ Add Product", "admin_add_product")]);
+  rows.push([Markup.button.callback("⬅️ Admin Panel", "admin_home")]);
+  return screenReply(ctx, products.length ? `📦 Manage Products\n\nSelect a product to edit, enable/disable, or delete.\nPage ${page + 1}/${totalPages}` : "No products found. Add your first product.", Markup.inlineKeyboard(rows));
+}
+
+async function showManagedProduct(ctx, productId) {
+  const product = await getManagedProduct(productId);
+  if (!product || product.status === "deleted") return screenReply(ctx, "Product not found or already deleted.", backButton(`admin_products_page_${ctx.session.adminProductPage || 0}`));
+  return screenReply(ctx, managedProductText(product), Markup.inlineKeyboard([
+    [Markup.button.callback("✏️ Edit Product", `admin_product_edit_${product.id}`)],
+    [Markup.button.callback(product.status === "active" ? "⏸ Disable Product" : "▶️ Enable Product", `admin_product_toggle_${product.id}`)],
+    [Markup.button.callback("🗑 Delete Product", `admin_product_delete_${product.id}`)],
+    [Markup.button.callback("⬅️ Products", `admin_products_page_${ctx.session.adminProductPage || 0}`)]
+  ]));
+}
+
 bot.action("admin_products", async (ctx) => {
   if (adminOnly(ctx)) return;
-  await ctx.answerCbQuery();
-  const products = await db.prepare("SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id DESC LIMIT 40").all();
-  return screenReply(ctx, products.length ? products.map((p) => `#${p.id} ${p.name}\n${p.category} | $${Number(p.price).toFixed(2)} | ${p.delivery_mode} | ${p.status}\nArea: ${p.area_codes || "None"}`).join("\n\n") : "No products found.", backButton("admin_home"));
+  await safeAnswer(ctx);
+  return showManagedProducts(ctx, 0);
+});
+
+bot.action(/^admin_products_page_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  return showManagedProducts(ctx, Number(ctx.match[1]));
+});
+
+bot.action(/^admin_product_view_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  ctx.session.adminFlow = null;
+  return showManagedProduct(ctx, Number(ctx.match[1]));
+});
+
+bot.action(/^admin_product_edit_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const product = await getManagedProduct(Number(ctx.match[1]));
+  if (!product || product.status === "deleted") return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  return screenReply(ctx, `${managedProductText(product)}\n\nWhat do you want to edit?`, Markup.inlineKeyboard([
+    [Markup.button.callback("📝 Name", `admin_product_edit_name_${product.id}`), Markup.button.callback("💵 Price", `admin_product_edit_price_${product.id}`)],
+    [Markup.button.callback("📁 Category", `admin_product_edit_category_${product.id}`), Markup.button.callback("📍 Area Codes", `admin_product_edit_area_${product.id}`)],
+    [Markup.button.callback("🚚 Delivery Mode", `admin_product_edit_delivery_${product.id}`)],
+    [Markup.button.callback("⬅️ Product", `admin_product_view_${product.id}`)]
+  ]));
+});
+
+for (const field of ["name", "price", "area"]) {
+  bot.action(new RegExp(`^admin_product_edit_${field}_(\\d+)$`), async (ctx) => {
+    if (adminOnly(ctx)) return;
+    await safeAnswer(ctx);
+    const productId = Number(ctx.match[1]);
+    const product = await getManagedProduct(productId);
+    if (!product || product.status === "deleted") return screenReply(ctx, "Product not found.", backButton("admin_products"));
+    ctx.session.adminFlow = { type: "product_edit", step: field, productId };
+    if (field === "name") return screenReply(ctx, `Current name: ${product.name}\n\nSend the new product name:`, backButton(`admin_product_edit_${productId}`));
+    if (field === "price") return screenReply(ctx, `Current price: $${Number(product.price).toFixed(2)}\n\nSend the new price in USD:`, backButton(`admin_product_edit_${productId}`));
+    return screenReply(ctx, `Current area codes: ${product.area_codes || "None"}\n\nSend new area codes separated by commas, or use Clear Area Codes below.`, Markup.inlineKeyboard([
+      [Markup.button.callback("🧹 Clear Area Codes", `admin_product_edit_area_clear_${productId}`)],
+      [Markup.button.callback("⬅️ Back", `admin_product_edit_${productId}`)]
+    ]));
+  });
+}
+
+bot.action(/^admin_product_edit_area_clear_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const productId = Number(ctx.match[1]);
+  const result = await db.prepare("UPDATE products SET product_type='normal',area_codes='',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(productId);
+  if (!result.changes) return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  await syncManagedProduct(productId);
+  ctx.session.adminFlow = null;
+  return showManagedProduct(ctx, productId);
+});
+
+bot.action(/^admin_product_edit_category_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const productId = Number(ctx.match[1]);
+  const product = await getManagedProduct(productId);
+  if (!product || product.status === "deleted") return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  const categories = await db.prepare("SELECT id,name FROM categories WHERE status='active' ORDER BY name").all();
+  const rows = categories.map((category) => [Markup.button.callback(`${category.id === product.category_id ? "✅ " : ""}${category.name}`, `admin_product_edit_category_set_${productId}_${category.id}`)]);
+  rows.push([Markup.button.callback("⬅️ Back", `admin_product_edit_${productId}`)]);
+  return screenReply(ctx, `Current category: ${product.category}\n\nSelect the new category:`, Markup.inlineKeyboard(rows));
+});
+
+bot.action(/^admin_product_edit_category_set_(\d+)_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const productId = Number(ctx.match[1]);
+  const categoryId = Number(ctx.match[2]);
+  const category = await db.prepare("SELECT id FROM categories WHERE id=? AND status='active'").get(categoryId);
+  if (!category) return screenReply(ctx, "Category not found.", backButton(`admin_product_edit_${productId}`));
+  const result = await db.prepare("UPDATE products SET category_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(categoryId, productId);
+  if (!result.changes) return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  await syncManagedProduct(productId);
+  return showManagedProduct(ctx, productId);
+});
+
+bot.action(/^admin_product_edit_delivery_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const product = await getManagedProduct(Number(ctx.match[1]));
+  if (!product || product.status === "deleted") return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  return screenReply(ctx, `Current delivery: ${product.delivery_mode === "auto" ? "Automatic" : "Manual"}\n\nSelect delivery mode:`, Markup.inlineKeyboard([
+    [Markup.button.callback("⚡ Automatic", `admin_product_edit_delivery_set_${product.id}_auto`)],
+    [Markup.button.callback("👨‍💼 Manual", `admin_product_edit_delivery_set_${product.id}_manual`)],
+    [Markup.button.callback("⬅️ Back", `admin_product_edit_${product.id}`)]
+  ]));
+});
+
+bot.action(/^admin_product_edit_delivery_set_(\d+)_(auto|manual)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const productId = Number(ctx.match[1]);
+  const result = await db.prepare("UPDATE products SET delivery_mode=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(ctx.match[2], productId);
+  if (!result.changes) return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  await syncManagedProduct(productId);
+  return showManagedProduct(ctx, productId);
+});
+
+bot.action(/^admin_product_toggle_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const product = await getManagedProduct(Number(ctx.match[1]));
+  if (!product || product.status === "deleted") return screenReply(ctx, "Product not found.", backButton("admin_products"));
+  const status = product.status === "active" ? "inactive" : "active";
+  await db.prepare("UPDATE products SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, product.id);
+  await syncManagedProduct(product.id);
+  return showManagedProduct(ctx, product.id);
+});
+
+bot.action(/^admin_product_delete_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const product = await getManagedProduct(Number(ctx.match[1]));
+  if (!product || product.status === "deleted") return screenReply(ctx, "Product not found or already deleted.", backButton("admin_products"));
+  return screenReply(ctx, `⚠️ Delete Product?\n\n#${product.id} ${product.name}\n\nThe product will disappear from customers immediately. Existing orders, delivered records, and stock history will be kept.`, Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Yes, Delete", `admin_product_delete_confirm_${product.id}`)],
+    [Markup.button.callback("❌ Cancel", `admin_product_view_${product.id}`)]
+  ]));
+});
+
+bot.action(/^admin_product_delete_confirm_(\d+)$/, async (ctx) => {
+  if (adminOnly(ctx)) return;
+  await safeAnswer(ctx);
+  const productId = Number(ctx.match[1]);
+  const result = await db.prepare("UPDATE products SET status='deleted',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(productId);
+  if (!result.changes) return screenReply(ctx, "Product not found or already deleted.", backButton("admin_products"));
+  await syncManagedProduct(productId);
+  ctx.session.adminFlow = null;
+  return screenReply(ctx, `✅ Product #${productId} deleted.`, Markup.inlineKeyboard([
+    [Markup.button.callback("📦 Products", `admin_products_page_${ctx.session.adminProductPage || 0}`)],
+    [Markup.button.callback("⬅️ Admin Panel", "admin_home")]
+  ]));
 });
 
 bot.action("admin_add_stock", async (ctx) => {
@@ -491,7 +731,7 @@ bot.action("admin_add_stock", async (ctx) => {
   await safeAnswer(ctx);
   const products = await db.prepare("SELECT * FROM products WHERE status='active' AND delivery_mode='auto' ORDER BY id DESC").all();
   if (!products.length) return screenReply(ctx, "No active automatic-delivery products found.", backButton("admin_home"));
-  const rows = products.map((p) => [Markup.button.callback(`#${p.id} ${p.name}`, `admin_stock_product_${p.id}`)]);
+  const rows = products.map((p) => [Markup.button.callback(`#${p.id} ${String(p.name).slice(0, 46)}`, `admin_stock_product_${p.id}`)]);
   rows.push([Markup.button.callback("⬅️ Back", "admin_home")]);
   return screenReply(ctx, "Select product for stock:", Markup.inlineKeyboard(rows));
 });
@@ -504,20 +744,23 @@ bot.action(/^admin_stock_product_(\d+)$/, async (ctx) => {
   const codes = String(product.area_codes || "").split(",").map((x) => x.trim()).filter(Boolean);
   ctx.session.adminFlow = { type: "stock", step: codes.length ? "area" : "data", productId: product.id, productName: product.name };
   if (codes.length) {
-    const rows = codes.map((code) => [Markup.button.callback(code, `admin_stock_area_${product.id}_${code}`)]);
+    const rows = codes.map((code, index) => [Markup.button.callback(String(code).slice(0, 52), `admin_stock_area_${product.id}_${index}`)]);
     rows.push([Markup.button.callback("⬅️ Back", "admin_add_stock")]);
     return screenReply(ctx, `Product: ${product.name}\n\nSelect area code:`, Markup.inlineKeyboard(rows));
   }
   return screenReply(ctx, `Product: ${product.name}\n\nSend stock data.\nSend one item per line to add multiple stock items.`, Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", "admin_add_stock")]]));
 });
 
-bot.action(/^admin_stock_area_(\d+)_(.+)$/, async (ctx) => {
+bot.action(/^admin_stock_area_(\d+)_(\d+)$/, async (ctx) => {
   if (adminOnly(ctx)) return;
   await safeAnswer(ctx);
-  const product = await db.prepare("SELECT * FROM products WHERE id=?").get(ctx.match[1]);
+  const product = await db.prepare("SELECT * FROM products WHERE id=? AND status='active' AND delivery_mode='auto'").get(ctx.match[1]);
   if (!product) return screenReply(ctx, "Product not found.", backButton("admin_add_stock"));
-  ctx.session.adminFlow = { type: "stock", step: "data", productId: product.id, productName: product.name, areaCode: ctx.match[2] };
-  return screenReply(ctx, `Product: ${product.name}\nArea Code: ${ctx.match[2]}\n\nSend stock data.\nSend one item per line to add multiple stock items.`, Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `admin_stock_product_${product.id}`)]]));
+  const codes = String(product.area_codes || "").split(",").map((value) => value.trim()).filter(Boolean);
+  const areaCode = codes[Number(ctx.match[2])];
+  if (!areaCode) return screenReply(ctx, "Area code not found.", backButton(`admin_stock_product_${product.id}`));
+  ctx.session.adminFlow = { type: "stock", step: "data", productId: product.id, productName: product.name, areaCode };
+  return screenReply(ctx, `Product: ${product.name}\nArea Code: ${areaCode}\n\nSend stock data.\nSend one item per line to add multiple stock items.`, Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `admin_stock_product_${product.id}`)]]));
 });
 
 bot.action("admin_manual_orders", async (ctx) => {
@@ -675,8 +918,10 @@ bot.on("text", async (ctx, next) => {
 
   const af = ctx.session?.adminFlow;
   if (isAdmin(ctx) && af?.type === "category" && af.step === "name") {
+    const name = text.replace(/\s+/g, " ").trim();
+    if (!name || name.length > 80) return screenReply(ctx, "Send a category name between 1 and 80 characters:", backButton("admin_home"));
     try {
-      const result = await db.prepare("INSERT INTO categories(name) VALUES(?)").run(text);
+      const result = await db.prepare("INSERT INTO categories(name) VALUES(?)").run(name);
       ctx.session.adminFlow = null;
       return screenReply(ctx, `✅ Category added. ID: ${result.lastInsertRowid}`, Markup.inlineKeyboard([
         [Markup.button.callback("➕ Add Product", "admin_add_product")],
@@ -684,21 +929,52 @@ bot.on("text", async (ctx, next) => {
       ]));
     } catch { return screenReply(ctx, "This category already exists. Send another name:", backButton("admin_home")); }
   }
+  if (isAdmin(ctx) && af?.type === "product_edit") {
+    const product = await getManagedProduct(af.productId);
+    if (!product || product.status === "deleted") {
+      ctx.session.adminFlow = null;
+      return screenReply(ctx, "Product not found or already deleted.", backButton("admin_products"));
+    }
+    if (af.step === "name") {
+      const name = text.replace(/\s+/g, " ").trim();
+      if (!name || name.length > 120) return screenReply(ctx, "Send a product name between 1 and 120 characters:", backButton(`admin_product_edit_${af.productId}`));
+      await db.prepare("UPDATE products SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(name, af.productId);
+    } else if (af.step === "price") {
+      const price = Number(text);
+      if (!Number.isFinite(price) || price < 0) return screenReply(ctx, "Send a valid non-negative price. Example: 2.50", backButton(`admin_product_edit_${af.productId}`));
+      await db.prepare("UPDATE products SET price=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(price, af.productId);
+    } else if (af.step === "area") {
+      const codes = [...new Set(text.split(",").map((value) => value.trim()).filter(Boolean))];
+      if (!codes.length || codes.length > 50 || codes.join(", ").length > 500) {
+        return screenReply(ctx, "Send 1-50 valid area codes separated by commas.", backButton(`admin_product_edit_${af.productId}`));
+      }
+      await db.prepare("UPDATE products SET product_type='area',area_codes=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(codes.join(", "), af.productId);
+    } else {
+      ctx.session.adminFlow = null;
+      return showManagedProduct(ctx, af.productId);
+    }
+    const productId = af.productId;
+    await syncManagedProduct(productId);
+    ctx.session.adminFlow = null;
+    return showManagedProduct(ctx, productId);
+  }
   if (isAdmin(ctx) && af?.type === "product" && af.step === "name") {
-    af.name = text;
+    const name = text.replace(/\s+/g, " ").trim();
+    if (!name || name.length > 120) return screenReply(ctx, "Send a product name between 1 and 120 characters:", Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `admin_product_cat_${af.categoryId}`)]]));
+    af.name = name;
     af.step = "price";
     return screenReply(ctx, "Send product price in USD. Example: 2.50", Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `admin_product_cat_${af.categoryId}`)]]));
   }
   if (isAdmin(ctx) && af?.type === "product" && af.step === "price") {
     const price = Number(text);
-    if (!(price >= 0)) return screenReply(ctx, "Send a valid price. Example: 2.50", Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `admin_product_cat_${af.categoryId}`)]]));
+    if (!Number.isFinite(price) || price < 0) return screenReply(ctx, "Send a valid price. Example: 2.50", Markup.inlineKeyboard([[Markup.button.callback("⬅️ Back", `admin_product_cat_${af.categoryId}`)]]));
     af.price = price;
     af.step = "area_choice";
     return screenReply(ctx, "Does this product need area codes?", areaChoiceKeyboard(af));
   }
   if (isAdmin(ctx) && af?.type === "product" && af.step === "area_codes") {
     const codes = [...new Set(text.split(",").map((x) => x.trim()).filter(Boolean))];
-    if (!codes.length) return screenReply(ctx, "Send at least one area code, separated by commas.", backButton(`admin_product_cat_${af.categoryId}`));
+    if (!codes.length || codes.length > 50 || codes.join(", ").length > 500) return screenReply(ctx, "Send 1-50 valid area codes, separated by commas.", backButton(`admin_product_cat_${af.categoryId}`));
     af.productType = "area";
     af.areaCodes = codes.join(", ");
     af.step = "delivery";
@@ -856,14 +1132,14 @@ async function purchase(ctx, pending, quantity) {
 }
 
 function adminText() {
-  return `🛠 Admin Commands\n\nMost work is available from Admin Panel buttons.\n\n/addcategory Name\n/categories\n/addproduct CATEGORY_ID | Name | Price | normal/area | auto/manual\n/products\n/productstatus PRODUCT_ID | active/inactive\n/deleteproduct PRODUCT_ID\n/addstock PRODUCT_ID | Stock data\n/addstock PRODUCT_ID | AREA_CODE | Stock data\n/stocks PRODUCT_ID\n/deletestock STOCK_ID\n/approve REQUEST_ID\n/reject REQUEST_ID\n/addbalance USER_ID AMOUNT\n/cutbalance USER_ID AMOUNT\n/block USER_ID\n/unblock USER_ID\n/orders\n/syncstatus\n/syncall\n/broadcast Message`;
+  return `🛠 Admin Commands\n\nMost work is available from Admin Panel buttons.\n\n/addcategory Name\n/categories\n/addproduct CATEGORY_ID | Name | Price | normal/area | auto/manual\n/products\n/productstatus PRODUCT_ID | active/inactive\n/deleteproduct PRODUCT_ID\n/addstock PRODUCT_ID | Stock data\n/addstock PRODUCT_ID | AREA_CODE | Stock data\n/stocks PRODUCT_ID\n/deletestock STOCK_ID\n/approve REQUEST_ID\n/reject REQUEST_ID\n/addbalance USER_ID AMOUNT\n/cutbalance USER_ID AMOUNT\n/block USER_ID\n/unblock USER_ID\n/orders\n/syncstatus\n/syncall\n/backup\n/broadcast Message`;
 }
 
 bot.command("admin", (ctx) => adminOnly(ctx) || showAdmin(ctx));
 bot.command("addcategory", async (ctx) => {
   if (adminOnly(ctx)) return;
-  const name = ctx.message.text.replace(/^\/addcategory(@\w+)?\s*/i, "").trim();
-  if (!name) return ctx.reply("Usage: /addcategory Name");
+  const name = ctx.message.text.replace(/^\/addcategory(@\w+)?\s*/i, "").replace(/\s+/g, " ").trim();
+  if (!name || name.length > 80) return ctx.reply("Usage: /addcategory Name (maximum 80 characters)");
   try { const result = await db.prepare("INSERT INTO categories(name) VALUES(?)").run(name); return ctx.reply(`Category added. ID: ${result.lastInsertRowid}`); }
   catch { return ctx.reply("Category already exists or is invalid."); }
 });
@@ -876,7 +1152,7 @@ bot.command("addproduct", async (ctx) => {
   if (adminOnly(ctx)) return;
   const raw = ctx.message.text.replace(/^\/addproduct(@\w+)?\s*/i, "");
   const [categoryId, name, price, type="normal", delivery="auto"] = raw.split("|").map((x) => x.trim());
-  if (!categoryId || !name || !(Number(price) >= 0) || !["normal","area"].includes(type) || !["auto","manual"].includes(delivery)) return ctx.reply("Usage: /addproduct CATEGORY_ID | Name | Price | normal/area | auto/manual");
+  if (!categoryId || !name || name.length > 120 || !Number.isFinite(Number(price)) || Number(price) < 0 || !["normal","area"].includes(type) || !["auto","manual"].includes(delivery)) return ctx.reply("Usage: /addproduct CATEGORY_ID | Name | Price | normal/area | auto/manual");
   try {
     const result = await db.prepare("INSERT INTO products(category_id,name,price,product_type,delivery_mode) VALUES(?,?,?,?,?)").run(Number(categoryId), name, Number(price), type, delivery);
     const product = await db.prepare("SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=?").get(result.lastInsertRowid);
@@ -893,7 +1169,7 @@ bot.command("productstatus", async (ctx) => {
   if (adminOnly(ctx)) return;
   const [id, status] = ctx.message.text.replace(/^\/productstatus(@\w+)?\s*/i, "").split("|").map((x) => x.trim());
   if (!id || !["active","inactive"].includes(status)) return ctx.reply("Usage: /productstatus PRODUCT_ID | active/inactive");
-  const result = await db.prepare("UPDATE products SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(status, Number(id));
+  const result = await db.prepare("UPDATE products SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(status, Number(id));
   if (result.changes) { const product = await db.prepare("SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=?").get(Number(id)); await db.enqueueSheetEvent("product_upsert", product.id, product); }
   return ctx.reply(result.changes ? "Product updated." : "Product not found.");
 });
@@ -901,7 +1177,7 @@ bot.command("deleteproduct", async (ctx) => {
   if (adminOnly(ctx)) return;
   const id = Number(ctx.message.text.split(/\s+/)[1]);
   if (!id) return ctx.reply("Usage: /deleteproduct PRODUCT_ID");
-  const result = await db.prepare("UPDATE products SET status='deleted',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
+  const result = await db.prepare("UPDATE products SET status='deleted',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted'").run(id);
   if (result.changes) { const product = await db.prepare("SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=?").get(id); await db.enqueueSheetEvent("product_upsert", product.id, product); }
   return ctx.reply(result.changes ? "Product removed." : "Product not found.");
 });
@@ -987,6 +1263,7 @@ bot.command("reject", async (ctx) => {
 bot.command("orders", async (ctx) => { if (adminOnly(ctx)) return; const rows = await db.prepare("SELECT * FROM orders ORDER BY id DESC LIMIT 30").all(); return ctx.reply(rows.length ? rows.map((o) => `#${o.id} | User ${o.telegram_id} | ${o.product_name} x${o.quantity} | $${Number(o.total_price).toFixed(2)}`).join("\n") : "No orders."); });
 bot.command("syncstatus", async (ctx) => { if (adminOnly(ctx)) return; return ctx.reply(await sheetStatusText()); });
 bot.command("syncall", async (ctx) => { if (adminOnly(ctx)) return; try { const count = await queueFullSync(); return ctx.reply(`Full Sheet sync queued: ${count} record(s).`); } catch (error) { return ctx.reply(`Full sync failed: ${error.message}`); } });
+bot.command("backup", (ctx) => sendDatabaseBackup(ctx));
 bot.command("broadcast", async (ctx) => { if (adminOnly(ctx)) return; const msg = ctx.message.text.replace(/^\/broadcast(@\w+)?\s*/i, "").trim(); if (!msg) return ctx.reply("Usage: /broadcast Message"); const users = await db.prepare("SELECT telegram_id FROM users WHERE status='active'").all(); let sent = 0; for (const user of users) { try { await bot.telegram.sendMessage(user.telegram_id, msg); sent += 1; } catch {} } return ctx.reply(`Broadcast sent to ${sent}/${users.length} users.`); });
 
 bot.catch((error) => console.error("Bot error:", error));

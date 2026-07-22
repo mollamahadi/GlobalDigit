@@ -3,7 +3,7 @@
 This setup uses the spreadsheet `Global Digits Bot Database` with ID:
 
 ```text
-1fQP5CBL1HVp5ovkp4NW7RZE6_Q_CHArGjbaUIWM2Hfs
+1qbsXuLUYgP0du2ac2s3yrFigQLhEwMtyVdtn2xEdGS0
 ```
 
 No service-account JSON or Google Cloud project is required.

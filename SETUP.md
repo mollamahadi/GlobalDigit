@@ -127,10 +127,14 @@ pm2 restart global-digits-bot
 
 ## 7. Backup
 
-PostgreSQL contains the real bot state. Google Sheets is a mirror, not a database backup. Create a dump regularly:
+PostgreSQL contains the real bot state. Google Sheets is a mirror, not a database backup. An admin can use **Database Backup** in the private Admin Panel or `/backup` to receive a compressed custom-format dump directly in Telegram. The backup excludes `.env` and bot tokens.
+
+The VPS needs `pg_dump` from the `postgresql-client` package. The included bootstrap script installs it automatically.
+
+For a manual VPS backup:
 
 ```bash
 pg_dump -U globaldigits -h 127.0.0.1 globaldigits_bot > globaldigits_backup.sql
 ```
 
-Store backups outside the VPS and protect them because they contain customer and delivered-account data.
+Store backups outside the VPS and protect them because they contain customer, stock, and delivered-account data. The bot deletes its temporary dump from the VPS after Telegram accepts the document.

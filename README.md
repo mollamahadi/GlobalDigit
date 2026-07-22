@@ -7,12 +7,13 @@ Production-ready Telegram digital-product store for `@GlobalDigits_Bot`.
 - PostgreSQL is the permanent source of truth; no SQLite database is included.
 - Google Sheets mirror through a simple Apps Script Web App; no service-account JSON is required.
 - Durable Sheet outbox: Telegram orders continue if Google is temporarily unavailable, and sync retries automatically.
-- Admin Panel product/category/stock management without editing source code.
+- Admin Panel product/category/stock management without editing source code, including product edit, enable/disable, and confirmed soft-delete controls.
 - Automatic or manual delivery selected while creating each product.
 - Optional manual area codes, including Google Voice, TN, TextNow, Telegram Stars, Facebook Account, and custom products.
 - Wallet add/cut, payment proof review, deposit approve/reject, QR payments, channel verification, terms, back navigation, and screen cleanup.
 - Concurrent automatic purchases are protected by PostgreSQL row locks so one stock item cannot be delivered twice.
 - GitHub Actions production deployment: every push to `main` securely copies the release to the VPS, validates it, applies the database schema, and reloads only this PM2 bot.
+- Admin-only PostgreSQL custom-format backup download from the private bot chat; `.env` and bot tokens are never included.
 
 ## First setup
 
@@ -48,5 +49,6 @@ Never commit `.env` or disclose the Apps Script webhook secret. Rotate the Teleg
 - `npm start` - run the bot.
 - `/syncstatus` - admin-only Sheet queue status.
 - `/syncall` - queue a complete PostgreSQL-to-Sheet refresh.
+- `/backup` - create and download an admin-only PostgreSQL backup.
 
 All regular management commands are also shown by the Admin Panel's **Commands** button.
