@@ -7,7 +7,7 @@ After this one-time setup, every push to the `main` branch automatically updates
 Create these under **Repository -> Settings -> Secrets and variables -> Actions**:
 
 - `VPS_HOST` - the VPS IP address.
-- `VPS_USER` - `globaldigitsbot`.
+- `VPS_USER` - the deployment SSH user (`root` in the current VPS setup).
 - `VPS_SSH_PRIVATE_KEY` - the complete private key printed from `/root/globaldigits-github-actions`, including the BEGIN and END lines.
 
 Never commit the private key or `.env` to the repository.
@@ -17,7 +17,6 @@ Never commit the private key or `.env` to the repository.
 Deployment never uploads or deletes these VPS-only items:
 
 - `.env`
-- `google-service-account.json`
 - `node_modules/`
 - `data/`
 

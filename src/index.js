@@ -336,7 +336,7 @@ bot.action("admin_home", async (ctx) => {
 
 async function sheetStatusText() {
   if (!config.sheetSyncEnabled) {
-    return "🔄 Google Sheet Sync\n\nStatus: Disabled\n\nSet SHEET_SYNC_ENABLED=true after completing the Google Sheet setup.";
+    return "🔄 Google Sheet Sync\n\nStatus: Disabled\n\nSet the Apps Script URL and secret, then enable SHEET_SYNC_ENABLED.";
   }
   const rows = await db.prepare("SELECT status,COUNT(*) count FROM sheet_outbox GROUP BY status ORDER BY status").all();
   const latestError = await db.prepare("SELECT last_error FROM sheet_outbox WHERE last_error IS NOT NULL ORDER BY id DESC LIMIT 1").get();

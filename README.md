@@ -5,7 +5,7 @@ Production-ready Telegram digital-product store for `@GlobalDigits_Bot`.
 ## Included
 
 - PostgreSQL is the permanent source of truth; no SQLite database is included.
-- Google Sheets mirror with `Users`, `Products`, `Stock`, `Orders`, `Delivered`, and `Deposits` tabs.
+- Google Sheets mirror through a simple Apps Script Web App; no service-account JSON is required.
 - Durable Sheet outbox: Telegram orders continue if Google is temporarily unavailable, and sync retries automatically.
 - Admin Panel product/category/stock management without editing source code.
 - Automatic or manual delivery selected while creating each product.
@@ -21,7 +21,7 @@ Follow [SETUP.md](SETUP.md). In short:
 1. Create the PostgreSQL database and user.
 2. Copy `.env.example` to `.env` and set `BOT_TOKEN`, database password, and IDs.
 3. Run `npm ci` and `npm run db:check`.
-4. Set up the Google service account and Sheet, then enable Sheet sync.
+4. Paste the included Apps Script into the Sheet and enable Sheet sync.
 5. Start locally with `npm start`, or follow [AUTO_DEPLOY.md](AUTO_DEPLOY.md) for automatic GitHub-to-VPS deployment.
 
 The schema and indexes are created automatically on first start.
@@ -39,7 +39,7 @@ The Sheet is a reporting mirror. Do not manually edit Sheet rows expecting them 
 
 ## Security
 
-Never commit `.env` or `google-service-account.json`. Both are already ignored by Git. Rotate the Telegram token immediately if it is ever exposed.
+Never commit `.env` or disclose the Apps Script webhook secret. Rotate the Telegram token immediately if it is ever exposed.
 
 ## Useful commands
 

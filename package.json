@@ -1,6 +1,6 @@
 {
   "name": "global-digits-bot",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Global Digits Telegram store with PostgreSQL and Google Sheets sync",
   "main": "src/index.js",
@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "dotenv": "^16.5.0",
-    "googleapis": "^160.0.0",
     "pg": "^8.16.3",
     "telegraf": "^4.16.3"
   }

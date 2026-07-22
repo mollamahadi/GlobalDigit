@@ -1,117 +1,45 @@
-const fs = require("fs");
-const { google } = require("googleapis");
 const config = require("./config");
 const db = require("./database");
 
-const SHEETS = {
-  user_upsert: {
-    tab: "Users",
-    headers: ["Telegram ID", "Username", "First Name", "Balance USD", "Status", "Terms Accepted", "Channel Verified", "Created At", "Updated At"],
-    row: (p) => [p.telegram_id, p.username, p.first_name, p.balance, p.status, p.terms_accepted, p.channel_verified, p.created_at, p.updated_at]
-  },
-  product_upsert: {
-    tab: "Products",
-    headers: ["Product ID", "Category ID", "Category", "Product Name", "Price USD", "Product Type", "Area Codes", "Delivery Mode", "Status", "Created At", "Updated At"],
-    row: (p) => [p.id, p.category_id, p.category, p.name, p.price, p.product_type, p.area_codes, p.delivery_mode, p.status, p.created_at, p.updated_at]
-  },
-  stock_upsert: {
-    tab: "Stock",
-    headers: ["Stock ID", "Product ID", "Product Name", "Area Code", "Account / Stock Details", "Status", "Sold To", "Sold At", "Created At"],
-    row: (p) => [p.id, p.product_id, p.product_name, p.area_code, p.stock_data, p.status, p.sold_to, p.sold_at, p.created_at]
-  },
-  order_upsert: {
-    tab: "Orders",
-    headers: ["Order ID", "Telegram ID", "Username", "Product ID", "Product Name", "Area Code", "Quantity", "Unit Price USD", "Total Price USD", "Delivery Mode", "Status", "Purchased At", "Delivered At"],
-    row: (p) => [p.id, p.telegram_id, p.username, p.product_id, p.product_name, p.area_code, p.quantity, p.unit_price, p.total_price, p.delivery_mode, p.status, p.created_at, p.delivered_at]
-  },
-  delivery_upsert: {
-    tab: "Delivered",
-    headers: ["Delivery ID", "Order ID", "Stock ID", "Telegram ID", "Username", "Product ID", "Product Name", "Area Code", "Delivered Account Details", "Delivery Mode", "Delivered At"],
-    row: (p) => [p.id, p.order_id, p.stock_id, p.telegram_id, p.username, p.product_id, p.product_name, p.area_code, p.delivered_data, p.delivery_mode, p.delivered_at]
-  },
-  deposit_upsert: {
-    tab: "Deposits",
-    headers: ["Request ID", "Telegram ID", "Username", "Amount USD", "Payment Method", "TXID / Hash", "Screenshot File ID", "Status", "Created At", "Reviewed At"],
-    row: (p) => [p.id, p.telegram_id, p.username, p.amount, p.method, p.txid, p.screenshot_file_id, p.status, p.created_at, p.reviewed_at]
-  }
-};
+const EVENT_TYPES = new Set([
+  "user_upsert",
+  "product_upsert",
+  "stock_upsert",
+  "order_upsert",
+  "delivery_upsert",
+  "deposit_upsert"
+]);
 
-let sheets;
 let timer;
 let running = false;
-let tabsReady = false;
+let appsScriptReady = false;
 
 function enabled() {
-  return config.sheetSyncEnabled && Boolean(config.googleSheetId);
+  return config.sheetSyncEnabled && Boolean(config.googleAppsScriptUrl) && Boolean(config.googleAppsScriptSecret);
 }
 
-async function getClient() {
-  if (sheets) return sheets;
-  if (!fs.existsSync(config.googleServiceAccountFile)) {
-    throw new Error(`Google service-account file not found: ${config.googleServiceAccountFile}`);
-  }
-  const auth = new google.auth.GoogleAuth({
-    keyFile: config.googleServiceAccountFile,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+async function callAppsScript(body) {
+  const response = await fetch(config.googleAppsScriptUrl, {
+    method: "POST",
+    redirect: "follow",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ secret: config.googleAppsScriptSecret, ...body }),
+    signal: AbortSignal.timeout(30000)
   });
-  sheets = google.sheets({ version: "v4", auth });
-  return sheets;
+  const text = await response.text();
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch {
+    throw new Error(`Apps Script returned a non-JSON response (${response.status}). Check Web App access and URL.`);
+  }
+  if (!response.ok || !result.ok) throw new Error(result.error || `Apps Script HTTP ${response.status}`);
+  return result;
 }
 
 async function ensureTabs() {
   if (!enabled()) return;
-  const api = await getClient();
-  const spreadsheet = await api.spreadsheets.get({ spreadsheetId: config.googleSheetId });
-  const existing = new Set((spreadsheet.data.sheets || []).map((s) => s.properties.title));
-  const required = [...new Set(Object.values(SHEETS).map((s) => s.tab))];
-  const missing = required.filter((title) => !existing.has(title));
-  if (missing.length) {
-    await api.spreadsheets.batchUpdate({
-      spreadsheetId: config.googleSheetId,
-      requestBody: { requests: missing.map((title) => ({ addSheet: { properties: { title } } })) }
-    });
-  }
-  for (const schema of Object.values(SHEETS)) {
-    const current = await api.spreadsheets.values.get({
-      spreadsheetId: config.googleSheetId,
-      range: `'${schema.tab}'!A1:Z1`
-    });
-    if (!(current.data.values || []).length) {
-      await api.spreadsheets.values.update({
-        spreadsheetId: config.googleSheetId,
-        range: `'${schema.tab}'!A1`,
-        valueInputOption: "RAW",
-        requestBody: { values: [schema.headers] }
-      });
-    }
-  }
-}
-
-async function upsertRow(schema, entityKey, payload) {
-  const api = await getClient();
-  const keys = await api.spreadsheets.values.get({
-    spreadsheetId: config.googleSheetId,
-    range: `'${schema.tab}'!A2:A`
-  });
-  const values = keys.data.values || [];
-  const index = values.findIndex((row) => String(row[0]) === String(entityKey));
-  const row = schema.row(payload).map((value) => value ?? "");
-  if (index >= 0) {
-    await api.spreadsheets.values.update({
-      spreadsheetId: config.googleSheetId,
-      range: `'${schema.tab}'!A${index + 2}`,
-      valueInputOption: "RAW",
-      requestBody: { values: [row] }
-    });
-  } else {
-    await api.spreadsheets.values.append({
-      spreadsheetId: config.googleSheetId,
-      range: `'${schema.tab}'!A:Z`,
-      valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [row] }
-    });
-  }
+  await callAppsScript({ action: "setup" });
 }
 
 async function claimEvent() {
@@ -140,9 +68,13 @@ async function processQueue() {
       const event = await claimEvent();
       if (!event) break;
       try {
-        const schema = SHEETS[event.event_type];
-        if (!schema) throw new Error(`Unknown sheet event: ${event.event_type}`);
-        await upsertRow(schema, event.entity_key, event.payload);
+        if (!EVENT_TYPES.has(event.event_type)) throw new Error(`Unknown sheet event: ${event.event_type}`);
+        await callAppsScript({
+          action: "upsert",
+          eventType: event.event_type,
+          entityKey: event.entity_key,
+          payload: event.payload
+        });
         await db.query("UPDATE sheet_outbox SET status='completed',completed_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=?", [event.id]);
       } catch (error) {
         const delaySeconds = Math.min(900, Math.max(10, 2 ** Math.min(event.attempts, 9)));
@@ -159,7 +91,7 @@ async function processQueue() {
 }
 
 async function queueFullSync() {
-  if (!enabled()) throw new Error("Google Sheet sync is disabled or GOOGLE_SHEET_ID is missing");
+  if (!enabled()) throw new Error("Apps Script Sheet sync is disabled or its URL/secret is missing");
   const groups = [
     ["user_upsert", "telegram_id", await db.prepare("SELECT * FROM users ORDER BY created_at").all()],
     ["product_upsert", "id", await db.prepare("SELECT p.*,c.name category FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id").all()],
@@ -182,27 +114,27 @@ async function queueFullSync() {
 
 async function startSheetWorker() {
   if (!enabled()) {
-    console.log("Google Sheet sync is disabled. PostgreSQL remains active.");
+    console.log("Apps Script Sheet sync is disabled. PostgreSQL remains active.");
     return;
   }
   await db.query("UPDATE sheet_outbox SET status='pending' WHERE status='processing'");
   const cycle = async () => {
     try {
-      if (!tabsReady) {
+      if (!appsScriptReady) {
         await ensureTabs();
-        tabsReady = true;
-        console.log("Google Sheet tabs are ready.");
+        appsScriptReady = true;
+        console.log("Apps Script and Google Sheet tabs are ready.");
       }
       await processQueue();
     } catch (error) {
-      tabsReady = false;
-      console.error("Google Sheet worker will retry:", error.message);
+      appsScriptReady = false;
+      console.error("Apps Script Sheet worker will retry:", error.message);
     }
   };
   await cycle();
   timer = setInterval(cycle, 10000);
   timer.unref();
-  console.log("Google Sheet sync worker is active.");
+  console.log("Apps Script Sheet sync worker is active.");
 }
 
 function stopSheetWorker() {

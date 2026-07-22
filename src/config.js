@@ -9,8 +9,8 @@ const config = {
   channelLink: process.env.CHANNEL_LINK || "",
   channelId: process.env.CHANNEL_ID || "",
   databaseUrl: process.env.DATABASE_URL || "",
-  googleSheetId: process.env.GOOGLE_SHEET_ID || "",
-  googleServiceAccountFile: process.env.GOOGLE_SERVICE_ACCOUNT_FILE || path.join(__dirname, "..", "google-service-account.json"),
+  googleAppsScriptUrl: process.env.GOOGLE_APPS_SCRIPT_URL || "",
+  googleAppsScriptSecret: process.env.GOOGLE_APPS_SCRIPT_SECRET || "",
   sheetSyncEnabled: ["1", "true", "yes"].includes(String(process.env.SHEET_SYNC_ENABLED || "false").toLowerCase()),
   port: Number(process.env.PORT || 3000)
 };

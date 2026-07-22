@@ -43,8 +43,8 @@ DATABASE_URL=postgresql://globaldigits:YOUR_STRONG_PASSWORD@127.0.0.1:5432/globa
 DATABASE_SSL=false
 DATABASE_POOL_SIZE=10
 SHEET_SYNC_ENABLED=false
-GOOGLE_SHEET_ID=
-GOOGLE_SERVICE_ACCOUNT_FILE=./google-service-account.json
+GOOGLE_APPS_SCRIPT_URL=
+GOOGLE_APPS_SCRIPT_SECRET=
 PORT=3010
 ```
 
@@ -59,26 +59,19 @@ npm start
 
 `npm start` keeps the terminal occupied while the bot runs; that is normal. Test `/start` in Telegram. Press `Ctrl+C` to stop the local process.
 
-## 3. Connect Google Sheets
+## 3. Connect Google Sheets with Apps Script
 
-1. In Google Cloud Console, create/select a project.
-2. Enable **Google Sheets API**.
-3. Create a **Service Account**, generate a JSON key, and download it.
-4. Rename the file to `google-service-account.json` and place it in the project root.
-5. Create one empty Google Spreadsheet.
-6. Copy the service account email from the JSON file and share the Spreadsheet with that email as **Editor**.
-7. Copy the Spreadsheet ID from the URL between `/d/` and `/edit`.
-8. Update `.env`:
+Follow [APPS_SCRIPT_SETUP.md](APPS_SCRIPT_SETUP.md). No Google Cloud project, service-account email, or JSON credential file is needed. After deploying the Apps Script Web App, update `.env`:
 
 ```dotenv
 SHEET_SYNC_ENABLED=true
-GOOGLE_SHEET_ID=YOUR_SPREADSHEET_ID
-GOOGLE_SERVICE_ACCOUNT_FILE=./google-service-account.json
+GOOGLE_APPS_SCRIPT_URL=YOUR_WEB_APP_EXEC_URL
+GOOGLE_APPS_SCRIPT_SECRET=YOUR_PRIVATE_WEBHOOK_SECRET
 ```
 
 Restart the bot. It creates the six tabs and their headers automatically. In the Admin Panel, use **Sheet Sync** or `/syncstatus` to see the queue.
 
-Important: never upload the service-account JSON to GitHub.
+Keep the webhook secret private and never commit `.env`.
 
 ## 4. Push safely to GitHub
 
@@ -93,7 +86,7 @@ git remote add origin YOUR_GITHUB_REPOSITORY_URL
 git push -u origin main
 ```
 
-Before `git add`, run `git status` and confirm `.env` and `google-service-account.json` are not listed.
+Before `git add`, run `git status` and confirm `.env` is not listed.
 
 ## 5. Automatic GitHub deployment (recommended)
 
