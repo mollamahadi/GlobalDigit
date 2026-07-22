@@ -8,8 +8,8 @@ const SCHEMAS = {
   },
   product_upsert: {
     tab: "Products",
-    headers: ["Product ID", "Category ID", "Category", "Product Name", "Price USD", "Product Type", "Area Codes", "Delivery Mode", "Status", "Created At", "Updated At"],
-    row: p => [p.id, p.category_id, p.category, p.name, p.price, p.product_type, p.area_codes, p.delivery_mode, p.status, p.created_at, p.updated_at]
+    headers: ["Product ID", "Category ID", "Category", "Product Name", "Price USD", "Product Type", "Area Codes", "Delivery Mode", "Status", "Created At", "Updated At", "Product Details"],
+    row: p => [p.id, p.category_id, p.category, p.name, p.price, p.product_type, p.area_codes, p.delivery_mode, p.status, p.created_at, p.updated_at, p.details]
   },
   stock_upsert: {
     tab: "Stock",
@@ -82,6 +82,8 @@ function getOrCreateSheet(schema) {
       .setFontWeight("bold")
       .setBackground("#1f4e78")
       .setFontColor("#ffffff");
+  } else {
+    sheet.getRange(1, 1, 1, schema.headers.length).setValues([schema.headers]);
   }
   return sheet;
 }

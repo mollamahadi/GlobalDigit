@@ -29,7 +29,7 @@ The schema and indexes are created automatically on first start.
 
 ## Sheet behavior
 
-- Product created/updated in the Admin Panel -> `Products`.
+- Product created/updated in the Admin Panel -> `Products`, including its customer-visible details/description.
 - Stock added or sold -> `Stock`.
 - Purchase made -> `Orders`.
 - Automatically delivered account or completed manual delivery -> `Delivered`, including account details.

@@ -1,6 +1,6 @@
 {
   "name": "global-digits-bot",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": true,
   "description": "Global Digits Telegram store with PostgreSQL and Google Sheets sync",
   "main": "src/index.js",

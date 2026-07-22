@@ -92,6 +92,7 @@ async function initialize() {
       category_id INTEGER NOT NULL REFERENCES categories(id),
       name TEXT NOT NULL,
       price NUMERIC(14,2) NOT NULL CHECK (price >= 0),
+      details TEXT NOT NULL DEFAULT '',
       product_type TEXT NOT NULL DEFAULT 'normal',
       area_codes TEXT NOT NULL DEFAULT '',
       delivery_mode TEXT NOT NULL DEFAULT 'auto',
@@ -177,6 +178,8 @@ async function initialize() {
       completed_at TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS sheet_outbox_pending_idx ON sheet_outbox(status, next_attempt_at, id);
+
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS details TEXT NOT NULL DEFAULT '';
   `);
 }
 
